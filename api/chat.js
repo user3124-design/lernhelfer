@@ -8,7 +8,7 @@ export const config = { runtime: "edge" };
 const URL = "https://api.groq.com/openai/v1/chat/completions";
 const MODEL = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
 const VISION_MODEL = process.env.GROQ_VISION_MODEL || ""; // leer = Fotos werden nicht unterstützt
-const MAX_INPUT = 14000; // Zeichen – das Gratis-Kontingent erlaubt nur wenige tausend Tokens pro Minute
+const MAX_INPUT = 12000; // Zeichen – das Gratis-Kontingent erlaubt nur wenige tausend Tokens pro Minute
 const SYSTEM =
   "Du bist ein freundlicher Lernhelfer für Schülerinnen und Schüler in Österreich. " +
   "Du hilfst nur beim Lernen: zusammenfassen, erklären, üben, abfragen. " +
@@ -58,18 +58,37 @@ export default async function handler(req) {
     messages: [{ role: "system", content: SYSTEM }, ...messages],
     stream: true,
     temperature: 0.4,
-    max_tokens: 2500,
+    max_tokens: 3500,
   };
   if (model.startsWith("openai/gpt-oss")) payload.reasoning_effort = "low";
-  if (body.json) payload.response_format = { type: "json_object" };
+  const call = (p) =>
+    fetch(URL, {
+      method: "POST",
+      headers: { Authorization: "Bearer " + key, "Content-Type": "application/json" },
+      body: JSON.stringify(p),
+    });
+
+  // Quiz: JSON-Modus ohne Streaming (sicherer), Antwort als ein einziges Stück weitergeben.
+  if (body.json) {
+    let res;
+    try {
+      res = await call({ ...payload, stream: false, response_format: { type: "json_object" } });
+      if (res.status === 400) res = await call({ ...payload, stream: false }); // falls der JSON-Modus scheitert
+    } catch {
+      return text("Die KI ist gerade nicht erreichbar.", 502);
+    }
+    if (res.status === 429) return text("Gerade zu viele Anfragen.", 429);
+    if (!res.ok) return text("KI-Fehler: " + (await res.text()).slice(0, 300), 502);
+    const data = await res.json();
+    const content = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || "";
+    return new Response("data: " + JSON.stringify({ choices: [{ delta: { content } }] }) + "\n\ndata: [DONE]\n\n", {
+      headers: { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache" },
+    });
+  }
 
   let up;
   try {
-    up = await fetch(URL, {
-      method: "POST",
-      headers: { Authorization: "Bearer " + key, "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
+    up = await call(payload);
   } catch {
     return text("Die KI ist gerade nicht erreichbar.", 502);
   }
